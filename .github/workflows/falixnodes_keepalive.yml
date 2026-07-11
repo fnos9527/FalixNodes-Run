@@ -289,23 +289,31 @@ jobs:
 
                       if (status === 'offline') {
                           console.log("Container is Offline. Attempting to click Start button...");
-                          
-                          const startBtnExists = await page.evaluate(() => {
-                              const buttons = Array.from(document.querySelectorAll('button, a'));
-                              const btn = buttons.find(b => {
-                                  const text = b.innerText.trim().toLowerCase();
-                                  return text === 'start' || text.includes('start');
-                              });
-                              if (btn) {
-                                  btn.click();
-                                  return true;
-                              }
-                              return false;
-                          });
 
-                          if (startBtnExists) {
-                              console.log("Start button clicked. Waiting 30 seconds for state to update...");
-                              await sleep(30000);
+                          // 用 evaluateHandle 精确定位（只匹配完全等于 "start" 的按钮，
+                          // 避免 "Restart" 因为包含 "start" 子串被误判为同一个按钮）
+                          const startHandle = await page.evaluateHandle(() => {
+                              const candidates = Array.from(document.querySelectorAll('button, a'));
+                              return candidates.find(b => b.innerText.trim().toLowerCase() === 'start') || null;
+                          });
+                          const startEl = startHandle.asElement();
+
+                          if (startEl) {
+                              await startEl.evaluate(el => el.scrollIntoView({ block: 'center' }));
+                              await sleep(300);
+                              // 关键改动：用 Puppeteer 原生的 elementHandle.click()
+                              // （通过 CDP 真实模拟鼠标点击，isTrusted=true），
+                              // 而不是在页面脚本里调用 el.click()（isTrusted=false，
+                              // 很可能被站点的安全校验直接忽略，导致"点了但没反应"）。
+                              await startEl.click();
+                              console.log("Start button clicked (native mouse click).");
+
+                              // 点击后立刻截图，观察是否弹出二次确认框/验证框
+                              await sleep(3000);
+                              await page.screenshot({ path: `5b_right_after_click_${attempt}.png`, fullPage: true });
+
+                              console.log("Waiting 30 seconds for state to update...");
+                              await sleep(27000);
                           } else {
                               console.warn("Could not find Start button on the page!");
                               await page.screenshot({ path: `error_no_start_btn_${attempt}.png`, fullPage: true });
