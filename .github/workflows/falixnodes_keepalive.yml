@@ -155,23 +155,24 @@ jobs:
 
               const { browser, page } = response;
 
+              // 安全截图工具：带超时保护，就算某次截图卡住/失败也只警告不崩溃。
+              // 控制台页面上有很多动态/视频类广告，fullPage 截图容易长时间卡死，
+              // 所以这里加了超时兜底（默认不用 fullPage，视口已经够大，
+              // 需要的内容本来就在可视区域内）。
+              // 注意：这个函数定义在 try 外面，这样 catch 块里出错兜底截图时也能用到它。
+              async function safeScreenshot(path, options = {}) {
+                  try {
+                      await Promise.race([
+                          page.screenshot({ path, ...options }),
+                          new Promise((_, reject) => setTimeout(() => reject(new Error('screenshot timed out')), 15000))
+                      ]);
+                  } catch (err) {
+                      console.warn(`Screenshot skipped (${path}): ${err.message}`);
+                  }
+              }
+
               try {
                   await page.setViewport({ width: 1920, height: 1080 });
-
-                  // 安全截图工具：带超时保护，就算某次截图卡住/失败也只警告不崩溃。
-                  // 控制台页面上有很多动态/视频类广告，fullPage 截图容易长时间卡死，
-                  // 所以这里加了超时兜底（默认不用 fullPage，视口已经够大，
-                  // 需要的内容本来就在可视区域内）。
-                  async function safeScreenshot(path, options = {}) {
-                      try {
-                          await Promise.race([
-                              page.screenshot({ path, ...options }),
-                              new Promise((_, reject) => setTimeout(() => reject(new Error('screenshot timed out')), 15000))
-                          ]);
-                      } catch (err) {
-                          console.warn(`Screenshot skipped (${path}): ${err.message}`);
-                      }
-                  }
 
                   console.log("Navigating to login page...");
                   await page.goto('https://client.falixnodes.net/auth/login', { waitUntil: 'networkidle2', timeout: 60000 });
@@ -332,12 +333,20 @@ jobs:
                               // 自动点击 Cancel 跳过广告，让服务器正常启动。
                               const cancelHandle = await page.evaluateHandle(() => {
                                   if (!document.body.innerText.includes('Support Free Hosting')) return null;
+                                  const isVisible = (el) => {
+                                      const rect = el.getBoundingClientRect();
+                                      if (rect.width === 0 || rect.height === 0) return false;
+                                      const style = window.getComputedStyle(el);
+                                      if (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none') return false;
+                                      return true;
+                                  };
                                   const candidates = Array.from(
                                       document.querySelectorAll('button, a, [role="button"], div, span')
                                   ).filter(el =>
                                       el.children.length === 0 &&
                                       el.innerText &&
-                                      el.innerText.trim().toLowerCase() === 'cancel'
+                                      el.innerText.trim().toLowerCase() === 'cancel' &&
+                                      isVisible(el)
                                   );
                                   return candidates[0] || null;
                               });
@@ -347,7 +356,18 @@ jobs:
                                   console.log('检测到"观看广告"弹窗，点击 Cancel 跳过广告...');
                                   await cancelEl.evaluate(el => el.scrollIntoView({ block: 'center' }));
                                   await sleep(300);
-                                  await cancelEl.click();
+                                  try {
+                                      await cancelEl.click();
+                                  } catch (clickErr) {
+                                      // 兜底：Puppeteer 判定元素"不可点击"时，直接用坐标模拟鼠标点击
+                                      console.warn("cancelEl.click() 失败，改用坐标点击兜底:", clickErr.message);
+                                      const box = await cancelEl.boundingBox();
+                                      if (box) {
+                                          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+                                      } else {
+                                          console.warn("无法获取 Cancel 按钮坐标，跳过点击。");
+                                      }
+                                  }
                                   await sleep(1500);
                                   await safeScreenshot(`5c_after_cancel_ad_${attempt}.png`);
                               } else {
