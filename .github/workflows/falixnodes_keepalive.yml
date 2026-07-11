@@ -163,30 +163,47 @@ jobs:
                   await sleep(8000);
                   await page.screenshot({ path: '1_login_page.png' });
 
-                  // 工具函数：向指定输入框安全填值，填完后校验，不对就重试
+                  // 工具函数：向指定输入框安全填值。
+                  // 之前用 el.type() 逐字符输入会被页面的重渲染打断，导致输入的字符不断丢失
+                  // （日志显示内容是"afno" -> "afnos" -> "afnos8"这样一点点累加，而不是被清空重填）。
+                  // 这里改成用原生 input setter 一次性写入整个值，只触发一次 input/change 事件，
+                  // 绕开逐字符输入被打断的问题。每次重试都重新获取元素句柄，避免拿到已失效的旧节点。
                   async function safeFill(selector, value, label) {
-                      for (let i = 1; i <= 3; i++) {
+                      for (let i = 1; i <= 4; i++) {
                           const el = await page.$(selector);
                           if (!el) throw new Error(`Could not find ${label} input (selector: ${selector})`);
 
-                          // 先点击聚焦，再全选清空，避免残留旧内容
-                          await el.click({ clickCount: 3 });
-                          await page.keyboard.press('Backspace');
-                          await sleep(300);
+                          // 先点击聚焦一下（部分表单依赖 focus 事件触发校验/驱动 Turnstile）
+                          await el.click({ clickCount: 3 }).catch(() => {});
+                          await sleep(200);
 
-                          // 用键盘逐字输入，比 element.type 更不容易被局部重渲染打断
-                          await el.type(value, { delay: 120 });
+                          await page.evaluate((el, val) => {
+                              const proto = el.tagName === 'TEXTAREA'
+                                  ? window.HTMLTextAreaElement.prototype
+                                  : window.HTMLInputElement.prototype;
+                              const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                              // 先清空，再写入，确保不会和旧值拼接
+                              nativeSetter.call(el, '');
+                              el.dispatchEvent(new Event('input', { bubbles: true }));
+                              nativeSetter.call(el, val);
+                              el.dispatchEvent(new Event('input', { bubbles: true }));
+                              el.dispatchEvent(new Event('change', { bubbles: true }));
+                          }, el, value);
+
                           await sleep(500);
+                          // 失焦一下，触发可能存在的 onBlur 校验
+                          await page.evaluate(el => el.blur(), el).catch(() => {});
+                          await sleep(300);
 
                           const actualValue = await page.evaluate(el => el.value, el);
                           if (actualValue === value) {
                               console.log(`${label} filled correctly (attempt ${i}).`);
                               return;
                           }
-                          console.warn(`${label} mismatch on attempt ${i}: got "${actualValue}", expected length ${value.length}. Retrying...`);
+                          console.warn(`${label} mismatch on attempt ${i}: got "${actualValue}" (len ${actualValue.length}), expected length ${value.length}. Retrying...`);
                           await sleep(1000);
                       }
-                      throw new Error(`Failed to correctly fill ${label} after 3 attempts`);
+                      throw new Error(`Failed to correctly fill ${label} after retries`);
                   }
 
                   console.log("Waiting for Turnstile widget to settle before typing...");
