@@ -158,10 +158,25 @@ jobs:
               try {
                   await page.setViewport({ width: 1920, height: 1080 });
 
+                  // 安全截图工具：带超时保护，就算某次截图卡住/失败也只警告不崩溃。
+                  // 控制台页面上有很多动态/视频类广告，fullPage 截图容易长时间卡死，
+                  // 所以这里加了超时兜底（默认不用 fullPage，视口已经够大，
+                  // 需要的内容本来就在可视区域内）。
+                  async function safeScreenshot(path, options = {}) {
+                      try {
+                          await Promise.race([
+                              page.screenshot({ path, ...options }),
+                              new Promise((_, reject) => setTimeout(() => reject(new Error('screenshot timed out')), 15000))
+                          ]);
+                      } catch (err) {
+                          console.warn(`Screenshot skipped (${path}): ${err.message}`);
+                      }
+                  }
+
                   console.log("Navigating to login page...");
                   await page.goto('https://client.falixnodes.net/auth/login', { waitUntil: 'networkidle2', timeout: 60000 });
                   await sleep(8000);
-                  await page.screenshot({ path: '1_login_page.png', fullPage: true });
+                  await safeScreenshot('1_login_page.png', { fullPage: true });
 
                   // 工具函数：向指定输入框安全填值。
                   // 之前用 el.type() 逐字符输入会被页面的重渲染打断，导致输入的字符不断丢失
@@ -210,7 +225,7 @@ jobs:
                   // 先等待 Turnstile 组件本身出现并完成校验，避免它在你打字过程中重渲染打断输入
                   await page.waitForSelector('input[type="email"], input[autocomplete="username"]', { timeout: 30000 }).catch(() => {});
                   await sleep(10000); // 等待 Turnstile 首次校验稳定下来
-                  await page.screenshot({ path: '1b_before_typing.png', fullPage: true });
+                  await safeScreenshot('1b_before_typing.png', { fullPage: true });
 
                   console.log("Entering credentials...");
                   let emailSelector = 'input[type="email"]';
@@ -224,11 +239,11 @@ jobs:
 
                   await safeFill(emailSelector, process.env.FALIX_EMAIL, 'Email');
                   await safeFill(passwordSelector, process.env.FALIX_PASSWORD, 'Password');
-                  await page.screenshot({ path: '2_login_filled.png', fullPage: true });
+                  await safeScreenshot('2_login_filled.png', { fullPage: true });
 
                   console.log("Waiting a bit more for Turnstile to finalize...");
                   await sleep(5000);
-                  await page.screenshot({ path: '2_login_after_turnstile_wait.png', fullPage: true });
+                  await safeScreenshot('2_login_after_turnstile_wait.png', { fullPage: true });
 
                   console.log("Clicking Sign In...");
                   let signInButton = await page.$('button[type="submit"]');
@@ -257,7 +272,7 @@ jobs:
                       }
                   }
 
-                  await page.screenshot({ path: '3_after_login.png', fullPage: true });
+                  await safeScreenshot('3_after_login.png', { fullPage: true });
 
                   if (!loginSucceeded) {
                       // 打印页面上的校验错误信息，方便排查（比如账号密码是否正确、Turnstile 是否失败）
@@ -270,7 +285,7 @@ jobs:
                   console.log("Navigating to Server Console page...");
                   await page.goto('https://client.falixnodes.net/server/2845100/console', { waitUntil: 'networkidle2', timeout: 60000 });
                   await sleep(10000);
-                  await page.screenshot({ path: '4_console_loaded.png', fullPage: true });
+                  await safeScreenshot('4_console_loaded.png');
 
                   const maxRetries = 3;
                   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -285,7 +300,7 @@ jobs:
                       });
                       
                       console.log(`Current container status: ${status}`);
-                      await page.screenshot({ path: `5_status_check_${attempt}.png`, fullPage: true });
+                      await safeScreenshot(`5_status_check_${attempt}.png`);
 
                       if (status === 'offline') {
                           console.log("Container is Offline. Attempting to click Start button...");
@@ -310,13 +325,13 @@ jobs:
 
                               // 点击后立刻截图，观察是否弹出二次确认框/验证框
                               await sleep(3000);
-                              await page.screenshot({ path: `5b_right_after_click_${attempt}.png`, fullPage: true });
+                              await safeScreenshot(`5b_right_after_click_${attempt}.png`);
 
                               console.log("Waiting 30 seconds for state to update...");
                               await sleep(27000);
                           } else {
                               console.warn("Could not find Start button on the page!");
-                              await page.screenshot({ path: `error_no_start_btn_${attempt}.png`, fullPage: true });
+                              await safeScreenshot(`error_no_start_btn_${attempt}.png`);
                               await sleep(10000);
                           }
                       } else {
@@ -326,11 +341,11 @@ jobs:
                   }
 
                   console.log("Final check...");
-                  await page.screenshot({ path: '6_final_status.png', fullPage: true });
+                  await safeScreenshot('6_final_status.png');
 
               } catch (error) {
                   console.error("An error occurred during execution:", error);
-                  await page.screenshot({ path: 'error_exception.png', fullPage: true });
+                  await safeScreenshot('error_exception.png');
               } finally {
                   console.log("Closing browser...");
                   await browser.close();
