@@ -161,7 +161,8 @@ jobs:
               const { browser, page } = response;
 
               // 自动关闭广告弹出的新标签页/新窗口（比如点击后 target="_blank" 跳去广告商网站），
-              // 避免这些额外标签页干扰主页面、拖慢甚至卡死浏览器渲染。
+              // 避免这些额外标签页干扰主页面。注意：这里只关闭"新开的标签页"，
+              // 不会拦截/屏蔽任何网络请求，不影响网站正常展示广告。
               browser.on('targetcreated', async (target) => {
                   try {
                       if (target.type() === 'page') {
@@ -174,34 +175,11 @@ jobs:
                   } catch (e) { /* 忽略关闭失败 */ }
               });
 
-              // 屏蔽常见广告/追踪网络域名的请求。控制台页面挂了大量视频类广告，
-              // 会导致 Chrome 渲染进程卡死、截图超时。从源头拦截这些请求可以让
-              // 页面加载更干净、更稳定（注意：不屏蔽 cloudflare 相关域名，避免影响 Turnstile 校验）。
-              const AD_BLOCK_PATTERNS = [
-                  'doubleclick.net', 'googlesyndication.com', 'google-analytics.com',
-                  'googletagmanager.com', 'googletagservices.com', 'adservice.google',
-                  'amazon-adsystem.com', 'connect.facebook.net', 'adnxs.com',
-                  'criteo.com', 'taboola.com', 'outbrain.com', 'pubmatic.com',
-                  'rubiconproject.com', 'moatads.com', '2mdn.net', 'adsafeprotected.com',
-                  'adsystem.com', 'adform.net', 'media.net', 'openx.net', 'smartadserver.com'
-              ];
-              await page.setRequestInterception(true);
-              page.on('request', (req) => {
-                  const url = req.url();
-                  const type = req.resourceType();
-                  // 按资源类型拦截：video/audio 类资源（媒体广告最常见的形式）
-                  // 最容易导致 Chrome 渲染进程持续重绘、无法产出稳定画面用于截图。
-                  // 这比逐个拉黑广告域名更彻底，不用担心漏掉某个没见过的广告网络。
-                  if (type === 'media') {
-                      req.abort().catch(() => {});
-                      return;
-                  }
-                  if (AD_BLOCK_PATTERNS.some(p => url.includes(p))) {
-                      req.abort().catch(() => {});
-                  } else {
-                      req.continue().catch(() => {});
-                  }
-              });
+              // 注意：这里特意不拦截/屏蔽任何广告网络请求。
+              // 之前试过用 setRequestInterception 屏蔽广告域名和 media 资源，
+              // 结果被网站的反广告拦截检测识别到，直接把页面重定向到了
+              // "AdBlock Detected" 拦截页，导致后续所有操作全部失败。
+              // 这个站点是靠广告支撑免费主机服务的，广告该加载还是让它正常加载。
 
               // 安全截图工具：带超时保护，就算某次截图卡住/失败也只警告不崩溃。
               // 控制台页面上有很多动态/视频类广告，fullPage 截图容易长时间卡死，
@@ -445,6 +423,24 @@ jobs:
 
                               console.log("Waiting 30 seconds for state to update...");
                               await sleep(27000);
+
+                              // 刷新页面再检查状态，避免 SPA 没有实时推送导致页面上
+                              // 显示的还是旧状态。刷新后顺便确认一下有没有被带去
+                              // 别的页面（比如广告拦截提示页）。
+                              console.log("刷新页面以获取最新状态...");
+                              try {
+                                  await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
+                              } catch (reloadErr) {
+                                  console.warn("页面刷新超时/失败，继续用当前页面内容检查状态:", reloadErr.message);
+                              }
+                              await sleep(3000);
+
+                              const urlAfterReload = page.url();
+                              if (!urlAfterReload.includes('/server/2845100/console')) {
+                                  console.warn(`刷新后 URL 不是控制台页面（当前: ${urlAfterReload}），尝试导航回控制台...`);
+                                  await page.goto('https://client.falixnodes.net/server/2845100/console', { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+                                  await sleep(3000);
+                              }
                           } else {
                               console.warn("Could not find Start button on the page!");
                               await safeScreenshot(`error_no_start_btn_${attempt}.png`);
