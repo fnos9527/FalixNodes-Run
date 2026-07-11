@@ -188,6 +188,14 @@ jobs:
               await page.setRequestInterception(true);
               page.on('request', (req) => {
                   const url = req.url();
+                  const type = req.resourceType();
+                  // 按资源类型拦截：video/audio 类资源（媒体广告最常见的形式）
+                  // 最容易导致 Chrome 渲染进程持续重绘、无法产出稳定画面用于截图。
+                  // 这比逐个拉黑广告域名更彻底，不用担心漏掉某个没见过的广告网络。
+                  if (type === 'media') {
+                      req.abort().catch(() => {});
+                      return;
+                  }
                   if (AD_BLOCK_PATTERNS.some(p => url.includes(p))) {
                       req.abort().catch(() => {});
                   } else {
@@ -325,12 +333,29 @@ jobs:
 
                   console.log("Navigating to Server Console page...");
                   await page.goto('https://client.falixnodes.net/server/2845100/console', { waitUntil: 'networkidle2', timeout: 60000 });
-                  await sleep(10000);
+                  console.log("Console page URL after navigation: " + page.url());
+
+                  // 主动等待页面上出现状态关键字，而不是赌一个固定的等待时长。
+                  // 如果 20 秒内都没等到，就不再死等，往下走用现有内容做一次状态判断
+                  // （用 evaluate 读取 DOM 文字不依赖渲染画面，比截图更可靠）。
+                  try {
+                      await page.waitForFunction(
+                          () => {
+                              const t = document.body.innerText;
+                              return t.includes('Offline') || t.includes('Running') || t.includes('Online') || t.includes('Starting');
+                          },
+                          { timeout: 20000 }
+                      );
+                      console.log("检测到控制台状态文字已加载。");
+                  } catch (e) {
+                      console.warn("等待状态文字超时（20秒），当前页面可能加载较慢，继续尝试读取现有内容。");
+                  }
+
                   await safeScreenshot('4_console_loaded.png');
 
                   const maxRetries = 3;
                   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                      console.log(`Checking container status (Attempt ${attempt}/${maxRetries})...`);
+                      console.log(`Checking container status (Attempt ${attempt}/${maxRetries})... [URL: ${page.url()}]`);
                       
                       const status = await page.evaluate(() => {
                           const bodyText = document.body.innerText;
@@ -341,6 +366,10 @@ jobs:
                       });
                       
                       console.log(`Current container status: ${status}`);
+                      if (status === 'unknown') {
+                          const snippet = await page.evaluate(() => document.body.innerText.slice(0, 800));
+                          console.log("状态未知，页面文字片段（用于排查）：\n" + snippet);
+                      }
                       await safeScreenshot(`5_status_check_${attempt}.png`);
 
                       if (status === 'offline') {
