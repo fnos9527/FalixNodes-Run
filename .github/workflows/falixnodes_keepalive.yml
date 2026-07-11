@@ -1,0 +1,280 @@
+name: FalixNodes Auto Keep Alive
+
+on:
+  workflow_dispatch: # 支持手动触发
+  repository_dispatch: # 支持 cron-job.org 通过 API 触发
+    types: [trigger-cron]
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install System Dependencies for Puppeteer & Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxss1 libasound2 libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgcc1 libgconf-2-4 libgdk-pixbuf2.0-0 libglib2.0-0 libgtk-3-0 libnspr4 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 ca-certificates fonts-liberation libappindicator1 libnss3 lsb-release xdg-utils wget
+
+      - name: Install Xray-core
+        run: |
+          sudo bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+      - name: Install npm dependencies
+        run: |
+          npm init -y
+          npm install puppeteer puppeteer-real-browser
+
+      - name: Create Xray config parser
+        run: |
+          cat << 'EOF' > parse_vless.js
+          const fs = require('fs');
+          const { URL } = require('url');
+
+          const vlessLink = process.env.VLESS_LINK;
+          if (!vlessLink) {
+              console.error("Error: VLESS_LINK secret is empty or missing!");
+              process.exit(1);
+          }
+
+          try {
+              const myUrl = new URL(vlessLink);
+              const uuid = myUrl.username || myUrl.pathname.split('@')[0].replace('//', '');
+              const host = myUrl.hostname;
+              const port = parseInt(myUrl.port || '443', 10);
+              const params = myUrl.searchParams;
+              
+              const security = params.get('security') || 'tls';
+              const network = params.get('type') || 'ws';
+              const path = params.get('path') || '/';
+              const sni = params.get('sni') || params.get('host') || host;
+              
+              const config = {
+                  log: { loglevel: "warning" },
+                  inbounds: [
+                      {
+                          port: 10808,
+                          listen: "127.0.0.1",
+                          protocol: "socks",
+                          settings: {
+                              auth: "noauth",
+                              udp: true,
+                              ip: "127.0.0.1"
+                          }
+                      }
+                  ],
+                  outbounds: [
+                      {
+                          protocol: "vless",
+                          settings: {
+                              vnext: [
+                                  {
+                                      address: host,
+                                      port: port,
+                                      users: [
+                                          {
+                                              id: uuid,
+                                              encryption: "none"
+                                          }
+                                      ]
+                                  }
+                              ]
+                          },
+                          streamSettings: {
+                              network: network,
+                              security: security,
+                              tlsSettings: {
+                                  serverName: sni,
+                                  allowInsecure: false
+                              },
+                              wsSettings: {
+                                  path: path,
+                                  headers: {
+                                      Host: sni
+                                  }
+                              }
+                          }
+                      }
+                  ]
+              };
+              
+              fs.writeFileSync('xray.json', JSON.stringify(config, null, 2));
+              console.log("xray.json has been generated successfully.");
+          } catch (e) {
+              console.error("Failed to parse VLESS_LINK:", e.message);
+              process.exit(1);
+          }
+          EOF
+
+      - name: Run VLESS Parser
+        env:
+          VLESS_LINK: ${{ secrets.VLESS_LINK }}
+        run: node parse_vless.js
+
+      - name: Start Xray Client Proxy
+        run: |
+          /usr/local/bin/xray -c xray.json > xray.log 2>&1 &
+          sleep 5
+          echo "Checking proxy connectivity..."
+          curl --socks5-hostname 127.0.0.1:10808 -m 15 https://api.ipify.org && echo "Proxy is working!" || (echo "Proxy check failed!" && cat xray.log && exit 1)
+
+      - name: Create Keep Alive Bot Script
+        run: |
+          cat << 'EOF' > bot.js
+          const { connect } = require('puppeteer-real-browser');
+          const fs = require('fs');
+
+          async function sleep(ms) {
+              return new Promise(resolve => setTimeout(resolve, ms));
+          }
+
+          (async () => {
+              console.log("Starting automation script...");
+              let response;
+              try {
+                  response = await connect({
+                      headless: 'auto',
+                      turnstile: true,
+                      args: ["--proxy-server=socks5://127.0.0.1:10808"]
+                  });
+              } catch (err) {
+                  console.error("Failed to connect to puppeteer-real-browser:", err);
+                  process.exit(1);
+              }
+
+              const { browser, page } = response;
+
+              try {
+                  await page.setViewport({ width: 1280, height: 800 });
+
+                  console.log("Navigating to login page...");
+                  await page.goto('https://client.falixnodes.net/auth/login', { waitUntil: 'networkidle2', timeout: 60000 });
+                  await sleep(8000);
+                  await page.screenshot({ path: '1_login_page.png' });
+
+                  console.log("Entering credentials...");
+                  let emailInput = await page.$('input[type="email"]');
+                  if (!emailInput) emailInput = await page.$('input[autocomplete="username"]');
+                  if (!emailInput) emailInput = await page.$('input[placeholder*="email" i]');
+                  if (!emailInput) emailInput = await page.$('input'); 
+
+                  let passwordInput = await page.$('input[type="password"]');
+                  if (!passwordInput) passwordInput = await page.$('input[autocomplete="current-password"]');
+                  if (!passwordInput) passwordInput = await page.$('input[placeholder*="password" i]');
+
+                  if (!emailInput || !passwordInput) {
+                      throw new Error("Could not find email or password inputs");
+                  }
+
+                  await emailInput.type(process.env.FALIX_EMAIL, { delay: 100 });
+                  await passwordInput.type(process.env.FALIX_PASSWORD, { delay: 100 });
+                  await page.screenshot({ path: '2_login_filled.png' });
+
+                  console.log("Waiting for Turnstile check to complete...");
+                  await sleep(15000); 
+                  await page.screenshot({ path: '2_login_after_turnstile_wait.png' });
+
+                  console.log("Clicking Sign In...");
+                  let signInButton = await page.$('button[type="submit"]');
+                  if (!signInButton) {
+                      signInButton = await page.evaluateHandle(() => {
+                          const buttons = Array.from(document.querySelectorAll('button'));
+                          return buttons.find(b => b.innerText.trim() === 'Sign In' || b.innerText.includes('Sign In'));
+                      });
+                  }
+
+                  if (!signInButton) {
+                      throw new Error("Could not find Sign In button");
+                  }
+
+                  await signInButton.click();
+                  console.log("Clicked Sign In button. Waiting for dashboard navigation...");
+                  
+                  await sleep(15000);
+                  await page.screenshot({ path: '3_after_login.png' });
+
+                  console.log("Navigating to Server Console page...");
+                  await page.goto('https://client.falixnodes.net/server/2845100/console', { waitUntil: 'networkidle2', timeout: 60000 });
+                  await sleep(10000);
+                  await page.screenshot({ path: '4_console_loaded.png' });
+
+                  const maxRetries = 3;
+                  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                      console.log(`Checking container status (Attempt ${attempt}/${maxRetries})...`);
+                      
+                      const status = await page.evaluate(() => {
+                          const bodyText = document.body.innerText;
+                          if (bodyText.includes('Offline')) return 'offline';
+                          if (bodyText.includes('Running') || bodyText.includes('Online')) return 'online';
+                          if (bodyText.includes('Starting')) return 'starting';
+                          return 'unknown';
+                      });
+                      
+                      console.log(`Current container status: ${status}`);
+                      await page.screenshot({ path: `5_status_check_${attempt}.png` });
+
+                      if (status === 'offline') {
+                          console.log("Container is Offline. Attempting to click Start button...");
+                          
+                          const startBtnExists = await page.evaluate(() => {
+                              const buttons = Array.from(document.querySelectorAll('button, a'));
+                              const btn = buttons.find(b => {
+                                  const text = b.innerText.trim().toLowerCase();
+                                  return text === 'start' || text.includes('start');
+                              });
+                              if (btn) {
+                                  btn.click();
+                                  return true;
+                              }
+                              return false;
+                          });
+
+                          if (startBtnExists) {
+                              console.log("Start button clicked. Waiting 30 seconds for state to update...");
+                              await sleep(30000);
+                          } else {
+                              console.warn("Could not find Start button on the page!");
+                              await page.screenshot({ path: `error_no_start_btn_${attempt}.png` });
+                              await sleep(10000);
+                          }
+                      } else {
+                          console.log(`Container state is [${status}], which is not offline. Stopping task.`);
+                          break;
+                      }
+                  }
+
+                  console.log("Final check...");
+                  await page.screenshot({ path: '6_final_status.png' });
+
+              } catch (error) {
+                  console.error("An error occurred during execution:", error);
+                  await page.screenshot({ path: 'error_exception.png' });
+              } finally {
+                  console.log("Closing browser...");
+                  await browser.close();
+              }
+          })();
+          EOF
+
+      - name: Run Keep Alive Bot
+        env:
+          FALIX_EMAIL: ${{ secrets.FALIX_EMAIL }}
+          FALIX_PASSWORD: ${{ secrets.FALIX_PASSWORD }}
+        run: node bot.js
+
+      - name: Upload Debug Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: |
+            *.png
+            xray.log
+          retention-days: 7
