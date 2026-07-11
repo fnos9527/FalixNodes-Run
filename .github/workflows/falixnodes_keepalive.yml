@@ -145,7 +145,12 @@ jobs:
                       args: [
                           "--proxy-server=socks5://127.0.0.1:10808",
                           "--no-sandbox",
-                          "--disable-setuid-sandbox"
+                          "--disable-setuid-sandbox",
+                          "--disable-dev-shm-usage",
+                          "--disable-gpu",
+                          "--disable-background-timer-throttling",
+                          "--disable-backgrounding-occluded-windows",
+                          "--disable-renderer-backgrounding"
                       ]
                   });
               } catch (err) {
@@ -154,6 +159,41 @@ jobs:
               }
 
               const { browser, page } = response;
+
+              // 自动关闭广告弹出的新标签页/新窗口（比如点击后 target="_blank" 跳去广告商网站），
+              // 避免这些额外标签页干扰主页面、拖慢甚至卡死浏览器渲染。
+              browser.on('targetcreated', async (target) => {
+                  try {
+                      if (target.type() === 'page') {
+                          const newPage = await target.page();
+                          if (newPage && newPage !== page) {
+                              console.log('检测到广告弹出新标签页，自动关闭:', target.url());
+                              await newPage.close().catch(() => {});
+                          }
+                      }
+                  } catch (e) { /* 忽略关闭失败 */ }
+              });
+
+              // 屏蔽常见广告/追踪网络域名的请求。控制台页面挂了大量视频类广告，
+              // 会导致 Chrome 渲染进程卡死、截图超时。从源头拦截这些请求可以让
+              // 页面加载更干净、更稳定（注意：不屏蔽 cloudflare 相关域名，避免影响 Turnstile 校验）。
+              const AD_BLOCK_PATTERNS = [
+                  'doubleclick.net', 'googlesyndication.com', 'google-analytics.com',
+                  'googletagmanager.com', 'googletagservices.com', 'adservice.google',
+                  'amazon-adsystem.com', 'connect.facebook.net', 'adnxs.com',
+                  'criteo.com', 'taboola.com', 'outbrain.com', 'pubmatic.com',
+                  'rubiconproject.com', 'moatads.com', '2mdn.net', 'adsafeprotected.com',
+                  'adsystem.com', 'adform.net', 'media.net', 'openx.net', 'smartadserver.com'
+              ];
+              await page.setRequestInterception(true);
+              page.on('request', (req) => {
+                  const url = req.url();
+                  if (AD_BLOCK_PATTERNS.some(p => url.includes(p))) {
+                      req.abort().catch(() => {});
+                  } else {
+                      req.continue().catch(() => {});
+                  }
+              });
 
               // 安全截图工具：带超时保护，就算某次截图卡住/失败也只警告不崩溃。
               // 控制台页面上有很多动态/视频类广告，fullPage 截图容易长时间卡死，
@@ -164,7 +204,7 @@ jobs:
                   try {
                       await Promise.race([
                           page.screenshot({ path, ...options }),
-                          new Promise((_, reject) => setTimeout(() => reject(new Error('screenshot timed out')), 15000))
+                          new Promise((_, reject) => setTimeout(() => reject(new Error('screenshot timed out')), 20000))
                       ]);
                   } catch (err) {
                       console.warn(`Screenshot skipped (${path}): ${err.message}`);
