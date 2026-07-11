@@ -327,6 +327,33 @@ jobs:
                               await sleep(3000);
                               await safeScreenshot(`5b_right_after_click_${attempt}.png`);
 
+                              // 点击 Start 后网站会弹出"观看广告解锁免费开机"的弹窗
+                              // （Support Free Hosting）。这里检测这个弹窗，如果出现就
+                              // 自动点击 Cancel 跳过广告，让服务器正常启动。
+                              const cancelHandle = await page.evaluateHandle(() => {
+                                  if (!document.body.innerText.includes('Support Free Hosting')) return null;
+                                  const candidates = Array.from(
+                                      document.querySelectorAll('button, a, [role="button"], div, span')
+                                  ).filter(el =>
+                                      el.children.length === 0 &&
+                                      el.innerText &&
+                                      el.innerText.trim().toLowerCase() === 'cancel'
+                                  );
+                                  return candidates[0] || null;
+                              });
+                              const cancelEl = cancelHandle.asElement();
+
+                              if (cancelEl) {
+                                  console.log('检测到"观看广告"弹窗，点击 Cancel 跳过广告...');
+                                  await cancelEl.evaluate(el => el.scrollIntoView({ block: 'center' }));
+                                  await sleep(300);
+                                  await cancelEl.click();
+                                  await sleep(1500);
+                                  await safeScreenshot(`5c_after_cancel_ad_${attempt}.png`);
+                              } else {
+                                  console.log("未检测到广告弹窗，继续等待状态更新。");
+                              }
+
                               console.log("Waiting 30 seconds for state to update...");
                               await sleep(27000);
                           } else {
