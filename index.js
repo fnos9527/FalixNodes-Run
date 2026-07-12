@@ -5,6 +5,26 @@ async function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// 辅助函数：注入 CSS 屏蔽页面广告
+async function hideAds(page) {
+    console.log("正在注入广告屏蔽样式...");
+    await page.evaluate(() => {
+        const style = document.createElement('style');
+        style.innerHTML = `
+            iframe, ins, .adsbygoogle, 
+            [id*="google_ads"], [class*="advertisement"], 
+            [class*="sidebar-ad"], #google_image_div,
+            div[style*="position: fixed"][style*="bottom: 0"] {
+                display: none !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+                height: 0px !important;
+            }
+        `;
+        document.head.appendChild(style);
+    });
+}
+
 async function run() {
     console.log("正在通过 puppeteer-real-browser 启动浏览器...");
     const { browser, page } = await connect({
@@ -15,14 +35,21 @@ async function run() {
         ],
         turnstile: true,
         headless: false,
-        connectOption: { defaultViewport: { width: 1280, height: 800 } }
+        // 将初始分辨率调整为 1920x1080
+        connectOption: { defaultViewport: { width: 1920, height: 1080 } }
     });
 
     try {
+        // 设置大分辨率视口
+        await page.setViewport({ width: 1920, height: 1080 });
+
         // 1. 登录流程
         console.log("正在打开登录页面...");
         await page.goto("https://client.falixnodes.net/auth/login", { waitUntil: "networkidle2" });
-        await delay(8000); // 等待 Cloudflare 自动检测与验证
+        await delay(8000); 
+
+        // 登录前隐藏可能遮挡输入框的广告
+        await hideAds(page);
 
         console.log("正在输入登录凭证...");
         await page.waitForSelector('input[type="email"]', { timeout: 15000 });
@@ -34,10 +61,10 @@ async function run() {
         await delay(2000);
         console.log("正在点击登录按钮...");
         
-        // 尝试寻找登录提交按钮
         const loginBtn = await page.$('button[type="submit"]') || await page.$('button');
         if (loginBtn) {
-            await loginBtn.click();
+            // 使用强力点击以防被挡
+            await page.evaluate(el => el.click(), loginBtn);
         } else {
             throw new Error("未找到登录按钮");
         }
@@ -52,18 +79,28 @@ async function run() {
         console.log(`正在跳转至控制台页面: ${consoleUrl}`);
         await page.goto(consoleUrl, { waitUntil: "networkidle2" });
         await delay(8000);
+        
+        // 净化控制台界面的广告，方便截图看清状态
+        await hideAds(page);
         await page.screenshot({ path: "screenshots/2_console_loaded.png" });
 
         // 循环检测与开机（最多尝试 3 次）
         for (let attempt = 1; attempt <= 3; attempt++) {
             console.log(`\n--- 开始执行第 ${attempt}/3 次状态检测与开机尝试 ---`);
             
+            // 重新刷新页面确保状态最新并过滤广告
+            if (attempt > 1) {
+                await page.reload({ waitUntil: "networkidle2" });
+                await delay(5000);
+                await hideAds(page);
+            }
+
             const pageContent = await page.content();
-            // 检查是否处于 Offline / 离线状态
+            // 兼容检查是否处于 Offline / 离线状态
             const isOffline = pageContent.toLowerCase().includes("offline") || pageContent.includes("离线");
 
             if (!isOffline) {
-                console.log("服务器当前不处于 Offline 状态（可能已开机或正在启动）。流程结束。");
+                console.log("服务器当前不处于 Offline 状态。流程结束。");
                 await page.screenshot({ path: "screenshots/3_server_running_status.png" });
                 break;
             }
@@ -73,16 +110,18 @@ async function run() {
             // 寻找启动按钮
             const startButton = await page.evaluateHandle(() => {
                 const buttons = Array.from(document.querySelectorAll('button'));
-                return buttons.find(b => b.textContent.includes('启动') || b.textContent.toLowerCase().includes('start'));
+                return buttons.find(b => b.textContent.includes('启动') || b.textContent.includes('Start'));
             });
 
             if (startButton && startButton.asElement()) {
-                await startButton.asElement().click();
-                console.log("已点击启动按钮。");
-                await delay(5000);
+                console.log("找到启动按钮，正在使用底层 JS 强制触发点击...");
+                // 改用 evaluate 执行点击，彻底解决 "Node is either not clickable" 报错
+                await page.evaluate(el => el.click(), startButton);
+                console.log("已触发点击。");
+                await delay(6000);
                 await page.screenshot({ path: `screenshots/4_after_start_click_attempt_${attempt}.png` });
             } else {
-                console.log("未能定位到启动按钮，请检查页面结构。");
+                console.log("未能定位到启动按钮。");
                 break;
             }
 
@@ -99,30 +138,15 @@ async function run() {
                 });
 
                 if (adButton && adButton.asElement()) {
-                    await adButton.asElement().click();
-                    console.log("已点击观看广告。等待 25 秒播放完毕...");
+                    await page.evaluate(el => el.click(), adButton);
+                    console.log("已强制点击观看广告。等待 25 秒播放完毕...");
                     await delay(25000);
-                    console.log("正在刷新页面以应用状态...");
-                    await page.reload({ waitUntil: "networkidle2" });
-                    await delay(8000);
                 } else {
-                    console.log("虽检测到广告文本，但未能成功点击按钮。刷新页面重试...");
-                    await page.reload({ waitUntil: "networkidle2" });
-                    await delay(8000);
+                    console.log("未定位到广告按钮。");
                 }
             } else {
                 console.log("未检测到广告弹窗。等待 10 秒确认容器是否成功启动...");
                 await delay(10000);
-                await page.screenshot({ path: `screenshots/5_final_status_attempt_${attempt}.png` });
-
-                const finalContent = await page.content();
-                const stillOffline = finalContent.toLowerCase().includes("offline") || finalContent.includes("离线");
-                if (!stillOffline) {
-                    console.log("容器已成功离开 Offline 状态。");
-                    break;
-                } else {
-                    console.log("容器仍处于 Offline 状态，准备进行下一次循环尝试。");
-                }
             }
         }
 
@@ -135,7 +159,6 @@ async function run() {
     }
 }
 
-// 创建截图保存目录
 if (!fs.existsSync('screenshots')) {
     fs.mkdirSync('screenshots');
 }
