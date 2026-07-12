@@ -1,0 +1,83 @@
+name: FalixNodes Auto Start
+
+on:
+  workflow_dispatch: # 支持手动触发
+  repository_dispatch: # 支持外部（如 cron-job.org 等）通过 API 触发
+    types: [active_trigger]
+
+jobs:
+  run-task:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgbm-dev libasound2 libnss3 libxss1 libatk-bridge2.0-0 libgtk-3-0
+
+      - name: Install Node Dependencies
+        run: npm install
+
+      - name: Download and Setup Xray
+        run: |
+          curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
+          unzip xray.zip xray
+          chmod +x xray
+
+      - name: Generate Xray Config from VLESS Link
+        env:
+          VLESS_LINK: ${{ secrets.VLESS_LINK }}
+        run: node parse-vless.js
+
+      - name: Start Xray Proxy Tunnel
+        run: |
+          ./xray -config xray_config.json > xray.log 2>&1 &
+          echo "等待 Xray 代理隧道建立..."
+          sleep 3
+
+      - name: Run Puppeteer Automator (with Xvfb)
+        env:
+          FALIX_EMAIL: ${{ secrets.FALIX_EMAIL }}
+          FALIX_PASSWORD: ${{ secrets.FALIX_PASSWORD }}
+        run: |
+          xvfb-run --server-args="-screen 0 1280x800x24" node index.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/artifacts@v4
+        with:
+          name: execution-screenshots
+          path: screenshots/
+          retention-days: 2
+
+      - name: Cleanup Workflow Run History (Keep Last 2 Runs Only)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 获取当前工作流的文件名
+          WORKFLOW_FILE="falix.yml"
+          
+          # 获取运行记录列表，跳过前2次，删除其余更早的运行记录
+          RUNS_TO_DELETE=$(gh run list --workflow="$WORKFLOW_FILE" --json databaseId -q '.[] | .databaseId' | tail -n +3)
+          
+          if [ -z "$RUNS_TO_DELETE" ]; then
+            echo "没有需要清理的旧历史记录。"
+          else
+            echo "发现旧运行记录，开始清理..."
+            for RUN_ID in $RUNS_TO_DELETE; do
+              echo "正在删除历史运行记录: ID $RUN_ID"
+              gh run delete "$RUN_ID" || true
+            done
+          fi
