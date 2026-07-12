@@ -52,7 +52,8 @@ jobs:
           FALIX_EMAIL: ${{ secrets.FALIX_EMAIL }}
           FALIX_PASSWORD: ${{ secrets.FALIX_PASSWORD }}
         run: |
-          xvfb-run --server-args="-screen 0 1280x800x24" node index.js
+          # 分辨率已调整为 1920x1080x24
+          xvfb-run --server-args="-screen 0 1920x1080x24" node index.js
 
       - name: Upload Screenshots
         if: always()
