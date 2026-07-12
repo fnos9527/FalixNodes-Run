@@ -56,7 +56,7 @@ jobs:
 
       - name: Upload Screenshots
         if: always()
-        uses: actions/artifacts@v4
+        uses: actions/upload-artifact@v4
         with:
           name: execution-screenshots
           path: screenshots/
@@ -66,10 +66,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取当前工作流的文件名
           WORKFLOW_FILE="falix.yml"
-          
-          # 获取运行记录列表，跳过前2次，删除其余更早的运行记录
           RUNS_TO_DELETE=$(gh run list --workflow="$WORKFLOW_FILE" --json databaseId -q '.[] | .databaseId' | tail -n +3)
           
           if [ -z "$RUNS_TO_DELETE" ]; then
