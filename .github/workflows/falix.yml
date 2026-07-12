@@ -52,16 +52,7 @@ jobs:
           FALIX_EMAIL: ${{ secrets.FALIX_EMAIL }}
           FALIX_PASSWORD: ${{ secrets.FALIX_PASSWORD }}
         run: |
-          # 分辨率已调整为 1920x1080x24
           xvfb-run --server-args="-screen 0 1920x1080x24" node index.js
-
-      - name: Upload Screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: execution-screenshots
-          path: screenshots/
-          retention-days: 2
 
       - name: Cleanup Workflow Run History (Keep Last 2 Runs Only)
         env:
