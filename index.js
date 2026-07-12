@@ -1,19 +1,7 @@
 const { connect } = require("puppeteer-real-browser");
-const fs = require('fs');
 
 async function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// 安全截图函数
-async function safeScreenshot(page, path) {
-    try {
-        console.log(`正在尝试保存截图: ${path}...`);
-        await page.screenshot({ path, timeout: 8000 });
-        console.log(`[成功] 截图已保存至: ${path}`);
-    } catch (err) {
-        console.log(`[提示] 截图生成超时，已自动跳过: ${err.message}`);
-    }
 }
 
 async function run() {
@@ -23,9 +11,9 @@ async function run() {
             "--proxy-server=socks5://127.0.0.1:10808",
             "--no-sandbox",
             "--disable-setuid-sandbox",
-            "--ignore-certificate-errors",         // 忽略代理下的 SSL/WSS 证书报错
-            "--allow-running-insecure-content",     // 允许不安全的混合内容
-            "--disable-web-security"                // 禁用安全策略以提高 WSS 稳定性
+            "--ignore-certificate-errors",
+            "--allow-running-insecure-content",
+            "--disable-web-security"
         ],
         turnstile: true,
         headless: false,
@@ -60,15 +48,12 @@ async function run() {
 
         console.log("等待登录跳转中...");
         await delay(12000);
-        await safeScreenshot(page, "screenshots/1_login_result.png");
 
         // 2. 控制台流程
         const consoleUrl = "https://client.falixnodes.net/server/2845100/console";
         console.log(`正在跳转至控制台页面: ${consoleUrl}`);
         await page.goto(consoleUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
         await delay(10000); // 留出充足时间让建立 WebSocket 握手
-        
-        await safeScreenshot(page, "screenshots/2_console_loaded.png");
 
         // 循环检测与开机（最多尝试 3 次）
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -105,8 +90,7 @@ async function run() {
             const isOffline = pageContent.toLowerCase().includes("offline") || pageContent.includes("离线");
 
             if (!isOffline) {
-                console.log("服务器当前不处于 Offline 状态（可能正在开机或在线）。流程结束。");
-                await safeScreenshot(page, "screenshots/3_server_running_status.png");
+                console.log("服务器当前不处于 Offline 状态。流程结束。");
                 break;
             }
 
@@ -124,14 +108,13 @@ async function run() {
                     const btn = buttons.find(b => b.textContent.includes('启动') || b.textContent.includes('Start'));
                     if (!btn) return null;
                     
-                    // 判断按钮是否带有 disabled 属性或被判定为不可用
                     const isDisabledAttr = btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled') === 'true';
                     const hasDisabledClass = btn.classList.contains('disabled') || btn.className.includes('disabled');
                     
                     if (isDisabledAttr || hasDisabledClass) {
-                        return null; // 仍处于禁用（灰色）状态
+                        return null; 
                     }
-                    return btn; // 已变为可用状态
+                    return btn; 
                 });
 
                 if (startButtonHandle && startButtonHandle.asElement()) {
@@ -145,7 +128,6 @@ async function run() {
 
             if (!isButtonReady) {
                 console.log("[提示] 启动按钮在 20 秒内未能激活（可能网络连接延迟高），我们将尝试强制进行底层点击。");
-                // 降级退回寻找普通按钮
                 startButtonHandle = await page.evaluateHandle(() => {
                     const buttons = Array.from(document.querySelectorAll('button'));
                     return buttons.find(b => b.textContent.includes('启动') || b.textContent.includes('Start'));
@@ -158,7 +140,6 @@ async function run() {
                 await page.evaluate(el => el.click(), startButtonHandle);
                 console.log("点击命令已发送。");
                 await delay(8000);
-                await safeScreenshot(page, `screenshots/4_after_start_click_attempt_${attempt}.png`);
             } else {
                 console.log("未能定位到任何启动按钮，退出循环。");
                 break;
@@ -191,15 +172,10 @@ async function run() {
 
     } catch (err) {
         console.error("执行过程中发生异常:", err);
-        await safeScreenshot(page, "screenshots/error_occurred.png");
     } finally {
         await browser.close();
         console.log("浏览器已关闭。");
     }
-}
-
-if (!fs.existsSync('screenshots')) {
-    fs.mkdirSync('screenshots');
 }
 
 run();
