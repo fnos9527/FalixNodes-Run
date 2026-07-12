@@ -35,17 +35,18 @@ async function run() {
         ],
         turnstile: true,
         headless: false,
-        // 将初始分辨率调整为 1920x1080
         connectOption: { defaultViewport: { width: 1920, height: 1080 } }
     });
 
     try {
-        // 设置大分辨率视口
+        // 设置默认导航超时为 60 秒
+        await page.setDefaultNavigationTimeout(60000);
         await page.setViewport({ width: 1920, height: 1080 });
 
         // 1. 登录流程
         console.log("正在打开登录页面...");
-        await page.goto("https://client.falixnodes.net/auth/login", { waitUntil: "networkidle2" });
+        // 改为 domcontentloaded，避免因个别背景广告卡住而超时
+        await page.goto("https://client.falixnodes.net/auth/login", { waitUntil: "domcontentloaded", timeout: 60000 });
         await delay(8000); 
 
         // 登录前隐藏可能遮挡输入框的广告
@@ -63,21 +64,21 @@ async function run() {
         
         const loginBtn = await page.$('button[type="submit"]') || await page.$('button');
         if (loginBtn) {
-            // 使用强力点击以防被挡
             await page.evaluate(el => el.click(), loginBtn);
         } else {
             throw new Error("未找到登录按钮");
         }
 
         console.log("等待登录跳转...");
-        await delay(10000);
+        await delay(12000);
         await page.screenshot({ path: "screenshots/1_login_result.png" });
         console.log("已保存登录结果截图：screenshots/1_login_result.png");
 
         // 2. 控制台流程
         const consoleUrl = "https://client.falixnodes.net/server/2845100/console";
         console.log(`正在跳转至控制台页面: ${consoleUrl}`);
-        await page.goto(consoleUrl, { waitUntil: "networkidle2" });
+        // 同样改为 domcontentloaded，并提高超时至 60 秒
+        await page.goto(consoleUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
         await delay(8000);
         
         // 净化控制台界面的广告，方便截图看清状态
@@ -90,7 +91,7 @@ async function run() {
             
             // 重新刷新页面确保状态最新并过滤广告
             if (attempt > 1) {
-                await page.reload({ waitUntil: "networkidle2" });
+                await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
                 await delay(5000);
                 await hideAds(page);
             }
@@ -115,7 +116,6 @@ async function run() {
 
             if (startButton && startButton.asElement()) {
                 console.log("找到启动按钮，正在使用底层 JS 强制触发点击...");
-                // 改用 evaluate 执行点击，彻底解决 "Node is either not clickable" 报错
                 await page.evaluate(el => el.click(), startButton);
                 console.log("已触发点击。");
                 await delay(6000);
