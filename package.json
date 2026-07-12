@@ -1,0 +1,9 @@
+{
+  "name": "falixnodes-autostart",
+  "version": "1.0.0",
+  "description": "Auto start FalixNodes container using puppeteer-real-browser and xray proxy",
+  "main": "index.js",
+  "dependencies": {
+    "puppeteer-real-browser": "^1.3.14"
+  }
+}
