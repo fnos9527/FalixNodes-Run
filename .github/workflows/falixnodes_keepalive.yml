@@ -8,6 +8,9 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    permissions:
+      actions: write   # 需要这个权限才能调用 API 删除旧的 artifacts
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -331,18 +334,20 @@ jobs:
 
                   await safeScreenshot('4_console_loaded.png');
 
+                  // 站点会根据出口 IP 地区自动切换中/英文界面，所以下面所有的文字判断
+                  // 都同时兼容中文和英文两种说法。
                   const maxRetries = 3;
                   for (let attempt = 1; attempt <= maxRetries; attempt++) {
                       console.log(`Checking container status (Attempt ${attempt}/${maxRetries})... [URL: ${page.url()}]`);
-                      
+
                       const status = await page.evaluate(() => {
                           const bodyText = document.body.innerText;
-                          if (bodyText.includes('Offline')) return 'offline';
-                          if (bodyText.includes('Running') || bodyText.includes('Online')) return 'online';
-                          if (bodyText.includes('Starting')) return 'starting';
+                          if (bodyText.includes('Offline') || bodyText.includes('离线')) return 'offline';
+                          if (bodyText.includes('Running') || bodyText.includes('Online') || bodyText.includes('在线')) return 'online';
+                          if (bodyText.includes('Starting') || bodyText.includes('启动中')) return 'starting';
                           return 'unknown';
                       });
-                      
+
                       console.log(`Current container status: ${status}`);
                       if (status === 'unknown') {
                           const snippet = await page.evaluate(() => document.body.innerText.slice(0, 800));
@@ -353,33 +358,37 @@ jobs:
                       if (status === 'offline') {
                           console.log("Container is Offline. Attempting to click Start button...");
 
-                          // 用 evaluateHandle 精确定位（只匹配完全等于 "start" 的按钮，
-                          // 避免 "Restart" 因为包含 "start" 子串被误判为同一个按钮）
+                          // 用 evaluateHandle 精确定位（只匹配完全等于 "start"/"开机" 的按钮，
+                          // 避免 "Restart"/"重启" 之类包含子串或近似文字被误判为同一个按钮）
                           const startHandle = await page.evaluateHandle(() => {
                               const candidates = Array.from(document.querySelectorAll('button, a'));
-                              return candidates.find(b => b.innerText.trim().toLowerCase() === 'start') || null;
+                              return candidates.find(b => {
+                                  const t = b.innerText.trim().toLowerCase();
+                                  return t === 'start' || b.innerText.trim() === '开机';
+                              }) || null;
                           });
                           const startEl = startHandle.asElement();
 
                           if (startEl) {
                               await startEl.evaluate(el => el.scrollIntoView({ block: 'center' }));
                               await sleep(300);
-                              // 关键改动：用 Puppeteer 原生的 elementHandle.click()
+                              // 用 Puppeteer 原生的 elementHandle.click()
                               // （通过 CDP 真实模拟鼠标点击，isTrusted=true），
                               // 而不是在页面脚本里调用 el.click()（isTrusted=false，
                               // 很可能被站点的安全校验直接忽略，导致"点了但没反应"）。
                               await startEl.click();
                               console.log("Start button clicked (native mouse click).");
 
-                              // 点击后立刻截图，观察是否弹出二次确认框/验证框
-                              await sleep(3000);
+                              // 点击后先等一下，看看会不会弹出"观看广告解锁免费开机"的弹窗
+                              // （中文："支持免费托管" / 英文："Support Free Hosting"）。
+                              // 注意：这个弹窗不是每次都会出现。
+                              await sleep(1500);
                               await safeScreenshot(`5b_right_after_click_${attempt}.png`);
 
-                              // 点击 Start 后网站会弹出"观看广告解锁免费开机"的弹窗
-                              // （Support Free Hosting）。这里检测这个弹窗，如果出现就
-                              // 自动点击 Cancel 跳过广告，让服务器正常启动。
-                              const cancelHandle = await page.evaluateHandle(() => {
-                                  if (!document.body.innerText.includes('Support Free Hosting')) return null;
+                              const watchAdHandle = await page.evaluateHandle(() => {
+                                  const bodyText = document.body.innerText;
+                                  const hasAdModal = bodyText.includes('Support Free Hosting') || bodyText.includes('支持免费托管');
+                                  if (!hasAdModal) return null;
                                   const isVisible = (el) => {
                                       const rect = el.getBoundingClientRect();
                                       if (rect.width === 0 || rect.height === 0) return false;
@@ -389,43 +398,41 @@ jobs:
                                   };
                                   const candidates = Array.from(
                                       document.querySelectorAll('button, a, [role="button"], div, span')
-                                  ).filter(el =>
-                                      el.children.length === 0 &&
-                                      el.innerText &&
-                                      el.innerText.trim().toLowerCase() === 'cancel' &&
-                                      isVisible(el)
-                                  );
+                                  ).filter(el => {
+                                      if (el.children.length !== 0 || !el.innerText) return false;
+                                      const t = el.innerText.trim();
+                                      return (t.toLowerCase() === 'watch ad' || t === '观看广告') && isVisible(el);
+                                  });
                                   return candidates[0] || null;
                               });
-                              const cancelEl = cancelHandle.asElement();
+                              const watchAdEl = watchAdHandle.asElement();
 
-                              if (cancelEl) {
-                                  console.log('检测到"观看广告"弹窗，点击 Cancel 跳过广告...');
-                                  await cancelEl.evaluate(el => el.scrollIntoView({ block: 'center' }));
+                              if (watchAdEl) {
+                                  console.log('检测到"观看广告"弹窗，点击"观看广告"...');
+                                  await watchAdEl.evaluate(el => el.scrollIntoView({ block: 'center' }));
                                   await sleep(300);
                                   try {
-                                      await cancelEl.click();
+                                      await watchAdEl.click();
                                   } catch (clickErr) {
                                       // 兜底：Puppeteer 判定元素"不可点击"时，直接用坐标模拟鼠标点击
-                                      console.warn("cancelEl.click() 失败，改用坐标点击兜底:", clickErr.message);
-                                      const box = await cancelEl.boundingBox();
+                                      console.warn("watchAdEl.click() 失败，改用坐标点击兜底:", clickErr.message);
+                                      const box = await watchAdEl.boundingBox();
                                       if (box) {
                                           await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
                                       } else {
-                                          console.warn("无法获取 Cancel 按钮坐标，跳过点击。");
+                                          console.warn('无法获取"观看广告"按钮坐标，跳过点击。');
                                       }
                                   }
-                                  await sleep(1500);
-                                  await safeScreenshot(`5c_after_cancel_ad_${attempt}.png`);
+                                  await safeScreenshot(`5c_after_watch_ad_${attempt}.png`);
+                                  console.log("等待 20 秒让广告播放...");
+                                  await sleep(20000);
                               } else {
-                                  console.log("未检测到广告弹窗，继续等待状态更新。");
+                                  console.log("未检测到广告弹窗，等待 30 秒...");
+                                  await sleep(30000);
                               }
 
-                              console.log("Waiting 30 seconds for state to update...");
-                              await sleep(27000);
-
-                              // 刷新页面再检查状态，避免 SPA 没有实时推送导致页面上
-                              // 显示的还是旧状态。刷新后顺便确认一下有没有被带去
+                              // 刷新页面获取最新的容器状态，避免 SPA 没有实时推送导致
+                              // 页面上显示的还是旧状态。刷新后顺便确认一下有没有被带去
                               // 别的页面（比如广告拦截提示页）。
                               console.log("刷新页面以获取最新状态...");
                               try {
@@ -433,13 +440,13 @@ jobs:
                               } catch (reloadErr) {
                                   console.warn("页面刷新超时/失败，继续用当前页面内容检查状态:", reloadErr.message);
                               }
-                              await sleep(3000);
+                              await sleep(2000);
 
                               const urlAfterReload = page.url();
                               if (!urlAfterReload.includes('/server/2845100/console')) {
                                   console.warn(`刷新后 URL 不是控制台页面（当前: ${urlAfterReload}），尝试导航回控制台...`);
                                   await page.goto('https://client.falixnodes.net/server/2845100/console', { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
-                                  await sleep(3000);
+                                  await sleep(2000);
                               }
                           } else {
                               console.warn("Could not find Start button on the page!");
@@ -480,3 +487,30 @@ jobs:
             *.png
             xray.log
           retention-days: 7
+
+      - name: Cleanup old artifacts (只保留最近 2 次运行的结果)
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // 拉取所有 debug-screenshots 工件，按创建时间倒序排列
+            const { data } = await github.rest.actions.listArtifactsForRepo({
+              owner, repo, per_page: 100
+            });
+            const debugArtifacts = data.artifacts
+              .filter(a => a.name === 'debug-screenshots')
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            // 保留最新的 2 个（包括这次刚上传的），其余全部删除
+            const toDelete = debugArtifacts.slice(2);
+            console.log(`共找到 ${debugArtifacts.length} 个 debug-screenshots 工件，将删除 ${toDelete.length} 个旧的。`);
+
+            for (const artifact of toDelete) {
+              console.log(`删除旧工件: id=${artifact.id}, 创建于 ${artifact.created_at}`);
+              await github.rest.actions.deleteArtifact({
+                owner, repo, artifact_id: artifact.id
+              });
+            }
