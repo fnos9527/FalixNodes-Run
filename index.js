@@ -5,14 +5,14 @@ async function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// 安全截图函数：即使截图超时失败，也绝不影响开机流程继续执行
+// 安全截图函数
 async function safeScreenshot(page, path) {
     try {
         console.log(`正在尝试保存截图: ${path}...`);
         await page.screenshot({ path, timeout: 8000 });
         console.log(`[成功] 截图已保存至: ${path}`);
     } catch (err) {
-        console.log(`[提示] 截图生成超时或失败，已自动跳过（不影响核心开机流程）: ${err.message}`);
+        console.log(`[提示] 截图生成超时，已自动跳过: ${err.message}`);
     }
 }
 
@@ -22,7 +22,10 @@ async function run() {
         args: [
             "--proxy-server=socks5://127.0.0.1:10808",
             "--no-sandbox",
-            "--disable-setuid-sandbox"
+            "--disable-setuid-sandbox",
+            "--ignore-certificate-errors",         // 忽略代理下的 SSL/WSS 证书报错
+            "--allow-running-insecure-content",     // 允许不安全的混合内容
+            "--disable-web-security"                // 禁用安全策略以提高 WSS 稳定性
         ],
         turnstile: true,
         headless: false,
@@ -30,7 +33,6 @@ async function run() {
     });
 
     try {
-        // 设置默认导航超时
         await page.setDefaultNavigationTimeout(60000);
         await page.setViewport({ width: 1920, height: 1080 });
 
@@ -64,7 +66,7 @@ async function run() {
         const consoleUrl = "https://client.falixnodes.net/server/2845100/console";
         console.log(`正在跳转至控制台页面: ${consoleUrl}`);
         await page.goto(consoleUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-        await delay(8000);
+        await delay(10000); // 留出充足时间让建立 WebSocket 握手
         
         await safeScreenshot(page, "screenshots/2_console_loaded.png");
 
@@ -74,39 +76,95 @@ async function run() {
             
             if (attempt > 1) {
                 await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
-                await delay(5000);
+                await delay(8000);
             }
 
+            // A. 检测并应对“连接丢失”弹窗
+            const hasConnectionLost = await page.evaluate(() => {
+                const text = document.body.innerText;
+                return text.includes("Connection lost") || text.includes("连接已断开");
+            });
+
+            if (hasConnectionLost) {
+                console.log("[警告] 检测到 WebSocket 连接丢失，尝试等待 6 秒重建连接...");
+                await delay(6000);
+                // 再次检查
+                const stillLost = await page.evaluate(() => {
+                    const text = document.body.innerText;
+                    return text.includes("Connection lost") || text.includes("连接已断开");
+                });
+                if (stillLost) {
+                    console.log("[警告] 仍未连接成功，强制刷新控制台页面...");
+                    await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
+                    await delay(10000);
+                }
+            }
+
+            // B. 检查服务器状态
             const pageContent = await page.content();
-            // 兼容检查是否处于 Offline / 离线状态
             const isOffline = pageContent.toLowerCase().includes("offline") || pageContent.includes("离线");
 
             if (!isOffline) {
-                console.log("服务器当前不处于 Offline 状态。流程结束。");
+                console.log("服务器当前不处于 Offline 状态（可能正在开机或在线）。流程结束。");
                 await safeScreenshot(page, "screenshots/3_server_running_status.png");
                 break;
             }
 
-            console.log("检测到服务器状态为 Offline，准备尝试开机...");
+            console.log("服务器状态确认：Offline。开始准备开机步骤...");
 
-            // 寻找启动按钮
-            const startButton = await page.evaluateHandle(() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                return buttons.find(b => b.textContent.includes('启动') || b.textContent.includes('Start'));
-            });
+            // C. 动态等待启动按钮“可用/被激活”（非灰色状态）
+            console.log("正在等待启动按钮激活转绿...");
+            let isButtonReady = false;
+            let startButtonHandle = null;
 
-            if (startButton && startButton.asElement()) {
-                console.log("找到启动按钮，正在使用底层 JS 强制触发点击...");
-                await page.evaluate(el => el.click(), startButton);
-                console.log("已触发点击。");
-                await delay(6000);
+            // 循环检测 10 次，每次间隔 2 秒，最多等 20 秒
+            for (let check = 1; check <= 10; check++) {
+                startButtonHandle = await page.evaluateHandle(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const btn = buttons.find(b => b.textContent.includes('启动') || b.textContent.includes('Start'));
+                    if (!btn) return null;
+                    
+                    // 判断按钮是否带有 disabled 属性或被判定为不可用
+                    const isDisabledAttr = btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled') === 'true';
+                    const hasDisabledClass = btn.classList.contains('disabled') || btn.className.includes('disabled');
+                    
+                    if (isDisabledAttr || hasDisabledClass) {
+                        return null; // 仍处于禁用（灰色）状态
+                    }
+                    return btn; // 已变为可用状态
+                });
+
+                if (startButtonHandle && startButtonHandle.asElement()) {
+                    isButtonReady = true;
+                    console.log(`[成功] 启动按钮已于第 ${check * 2} 秒成功激活！`);
+                    break;
+                }
+                
+                await delay(2000);
+            }
+
+            if (!isButtonReady) {
+                console.log("[提示] 启动按钮在 20 秒内未能激活（可能网络连接延迟高），我们将尝试强制进行底层点击。");
+                // 降级退回寻找普通按钮
+                startButtonHandle = await page.evaluateHandle(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    return buttons.find(b => b.textContent.includes('启动') || b.textContent.includes('Start'));
+                });
+            }
+
+            // D. 执行开机点击
+            if (startButtonHandle && startButtonHandle.asElement()) {
+                console.log("正在强制触发点击启动按钮...");
+                await page.evaluate(el => el.click(), startButtonHandle);
+                console.log("点击命令已发送。");
+                await delay(8000);
                 await safeScreenshot(page, `screenshots/4_after_start_click_attempt_${attempt}.png`);
             } else {
-                console.log("未能定位到启动按钮。");
+                console.log("未能定位到任何启动按钮，退出循环。");
                 break;
             }
 
-            // 检测是否存在广告弹窗
+            // E. 检查并应对广告弹窗
             const hasAdPopup = await page.evaluate(() => {
                 return document.body.innerText.includes("观看广告") || document.body.innerText.toLowerCase().includes("watch ad");
             });
@@ -123,7 +181,7 @@ async function run() {
                     console.log("已强制点击观看广告。等待 25 秒播放完毕...");
                     await delay(25000);
                 } else {
-                    console.log("未定位到广告按钮。");
+                    console.log("未成功定位到广告播放按钮。");
                 }
             } else {
                 console.log("未检测到广告弹窗。等待 10 秒确认容器是否成功启动...");
