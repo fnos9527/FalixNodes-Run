@@ -251,6 +251,50 @@ jobs:
                       throw new Error(`Failed to correctly fill ${label} after retries`);
                   }
 
+                  // 处理"AdBlock Detected"拦截页。
+                  // 根因：代理节点的出口 IP 大概率被广告网络拉黑，导致广告加载失败，
+                  // 网站就把这种情况误判成"用户开了广告拦截器"，弹出这堵墙挡住控制台内容。
+                  // 这不是我们主动屏蔽广告导致的，脚本层面没法从根源解决，
+                  // 只能靠"点击确认 + 刷新重试"碰运气，某次刷新时广告network可能就能正常加载了。
+                  async function handleAdBlockWall(maxAttempts = 3) {
+                      for (let i = 1; i <= maxAttempts; i++) {
+                          const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+                          const hasWall = bodyText.includes('AdBlock Detected') || bodyText.includes('检测到广告拦截');
+                          if (!hasWall) return true;
+
+                          console.warn(`检测到 "AdBlock Detected" 拦截页（第 ${i}/${maxAttempts} 次尝试绕过）...`);
+                          await safeScreenshot(`adblock_wall_attempt_${i}.png`);
+
+                          // 尝试点击"I've Disabled AdBlock"按钮
+                          const dismissHandle = await page.evaluateHandle(() => {
+                              const candidates = Array.from(document.querySelectorAll('button, a, div, span'));
+                              return candidates.find(el =>
+                                  el.children.length === 0 &&
+                                  el.innerText &&
+                                  el.innerText.includes('Disabled AdBlock')
+                              ) || null;
+                          });
+                          const dismissEl = dismissHandle.asElement();
+                          if (dismissEl) {
+                              try { await dismissEl.click(); } catch (e) { /* 忽略 */ }
+                          }
+
+                          await sleep(5000);
+                          try {
+                              await page.goto('https://client.falixnodes.net/server/2845100/console', { waitUntil: 'networkidle2', timeout: 60000 });
+                          } catch (e) { /* 忽略导航失败，下一轮循环会重新检测 */ }
+                          await sleep(3000);
+                      }
+
+                      const stillBlocked = (await page.evaluate(() => document.body.innerText).catch(() => '')).includes('AdBlock Detected');
+                      if (stillBlocked) {
+                          console.error('多次尝试后仍卡在 AdBlock 拦截页。大概率是代理出口 IP 被广告网络拉黑导致广告持续加载失败，这个问题出在网络环境本身，脚本层面难以彻底解决（可以考虑更换代理节点/线路）。');
+                          return false;
+                      }
+                      console.log('已成功绕过 AdBlock 拦截页。');
+                      return true;
+                  }
+
                   console.log("Waiting for Turnstile widget to settle before typing...");
                   // 先等待 Turnstile 组件本身出现并完成校验，避免它在你打字过程中重渲染打断输入
                   await page.waitForSelector('input[type="email"], input[autocomplete="username"]', { timeout: 30000 }).catch(() => {});
@@ -315,6 +359,9 @@ jobs:
                   console.log("Navigating to Server Console page...");
                   await page.goto('https://client.falixnodes.net/server/2845100/console', { waitUntil: 'networkidle2', timeout: 60000 });
                   console.log("Console page URL after navigation: " + page.url());
+
+                  // 先处理可能出现的 AdBlock 拦截页，再继续后面的状态检测逻辑
+                  await handleAdBlockWall();
 
                   // 主动等待页面上出现状态关键字，而不是赌一个固定的等待时长。
                   // 如果 20 秒内都没等到，就不再死等，往下走用现有内容做一次状态判断
@@ -448,6 +495,9 @@ jobs:
                                   await page.goto('https://client.falixnodes.net/server/2845100/console', { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
                                   await sleep(2000);
                               }
+
+                              // 刷新之后也可能弹出 AdBlock 拦截页，这里再检测处理一次
+                              await handleAdBlockWall();
                           } else {
                               console.warn("Could not find Start button on the page!");
                               await safeScreenshot(`error_no_start_btn_${attempt}.png`);
